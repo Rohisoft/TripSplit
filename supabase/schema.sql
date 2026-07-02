@@ -12,10 +12,14 @@ CREATE TABLE user_profiles (
 );
 
 -- Auto-create a blank profile row whenever a new auth user signs up.
+-- search_path is pinned explicitly and the table is schema-qualified: triggers
+-- fired from auth.users run in a context where an unqualified `user_profiles`
+-- can fail to resolve, which surfaces to the client as the generic
+-- "Database error saving new user" — this is the standard fix.
 CREATE OR REPLACE FUNCTION handle_new_user()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  INSERT INTO user_profiles (id, display_name)
+  INSERT INTO public.user_profiles (id, display_name)
   VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'display_name', split_part(NEW.email, '@', 1)));
   RETURN NEW;
 END;
@@ -49,9 +53,9 @@ CREATE TABLE trip_members (
 
 -- Auto-add the creator as 'owner' whenever a trip is created.
 CREATE OR REPLACE FUNCTION handle_new_trip()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  INSERT INTO trip_members (trip_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner');
+  INSERT INTO public.trip_members (trip_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner');
   RETURN NEW;
 END;
 $$;
@@ -125,14 +129,14 @@ ALTER TABLE settlements    ENABLE ROW LEVEL SECURITY;
 -- Helper functions (SECURITY DEFINER + STABLE avoids recursive RLS lookups,
 -- same pattern as MediPlus's my_tenant_id()/my_role()).
 CREATE OR REPLACE FUNCTION my_trip_ids()
-RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT trip_id FROM trip_members WHERE user_id = auth.uid();
+RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT trip_id FROM public.trip_members WHERE user_id = auth.uid();
 $$;
 
 CREATE OR REPLACE FUNCTION is_trip_owner(t_id UUID)
-RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (
-    SELECT 1 FROM trip_members WHERE trip_id = t_id AND user_id = auth.uid() AND role = 'owner'
+    SELECT 1 FROM public.trip_members WHERE trip_id = t_id AND user_id = auth.uid() AND role = 'owner'
   );
 $$;
 
@@ -163,32 +167,32 @@ CREATE POLICY "settlements_all" ON settlements FOR ALL USING (trip_id IN (SELECT
 -- before they've joined (bypasses RLS deliberately, read-only, minimal fields).
 CREATE OR REPLACE FUNCTION get_trip_by_invite(code TEXT)
 RETURNS TABLE(id UUID, name TEXT, emoji TEXT, currency TEXT, member_count BIGINT)
-LANGUAGE sql SECURITY DEFINER AS $$
+LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT t.id, t.name, t.emoji, t.currency, COUNT(m.id)
-  FROM trips t
-  LEFT JOIN trip_members m ON m.trip_id = t.id
+  FROM public.trips t
+  LEFT JOIN public.trip_members m ON m.trip_id = t.id
   WHERE t.invite_code = code
   GROUP BY t.id;
 $$;
 
 -- Idempotent join: safe to call again if already a member (returns existing row).
 CREATE OR REPLACE FUNCTION join_trip(code TEXT, uid UUID)
-RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_trip_id UUID;
   v_member_id UUID;
 BEGIN
-  SELECT id INTO v_trip_id FROM trips WHERE invite_code = code;
+  SELECT id INTO v_trip_id FROM public.trips WHERE invite_code = code;
   IF v_trip_id IS NULL THEN
     RAISE EXCEPTION 'Invalid invite code';
   END IF;
 
-  SELECT id INTO v_member_id FROM trip_members WHERE trip_id = v_trip_id AND user_id = uid;
+  SELECT id INTO v_member_id FROM public.trip_members WHERE trip_id = v_trip_id AND user_id = uid;
   IF v_member_id IS NOT NULL THEN
     RETURN v_member_id;
   END IF;
 
-  INSERT INTO trip_members (trip_id, user_id, role) VALUES (v_trip_id, uid, 'member')
+  INSERT INTO public.trip_members (trip_id, user_id, role) VALUES (v_trip_id, uid, 'member')
   RETURNING id INTO v_member_id;
 
   RETURN v_member_id;
